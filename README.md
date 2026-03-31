@@ -109,6 +109,7 @@ Available colors:
 - `yellow`
 - `green`
 - `blue`
+- `pink`
 - `magenta`
 - `white`
 

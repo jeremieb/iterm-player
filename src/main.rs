@@ -36,6 +36,7 @@ const MAX_SPECTRUM_HZ: f32 = 10_000.0;
 const SPECTRUM_FPS: u64 = 60;
 const NOW_PLAYING_POLL_SECS: u64 = 15;
 const MAX_ANALYSIS_BACKLOG_FRAMES: usize = 1;
+const SPECTRUM_GAIN: f32 = 0.72;
 
 #[derive(Clone, Copy)]
 struct Station {
@@ -78,12 +79,13 @@ struct Theme {
     color: Color,
 }
 
-const THEMES: [Theme; 7] = [
+const THEMES: [Theme; 8] = [
     Theme { name: "cyan", color: Color::Cyan },
     Theme { name: "red", color: Color::Red },
     Theme { name: "yellow", color: Color::Yellow },
     Theme { name: "green", color: Color::Green },
     Theme { name: "blue", color: Color::Blue },
+    Theme { name: "pink", color: Color::LightMagenta },
     Theme { name: "magenta", color: Color::Magenta },
     Theme { name: "white", color: Color::White },
 ];
@@ -845,7 +847,7 @@ impl SpectrumAnalyzer {
 
         for (i, db) in self.dbs.iter().copied().enumerate() {
             let normalized = ((db - self.noise_floor_db) / dynamic_range).clamp(0.0, 1.0);
-            self.raw[i] = normalized.powf(0.85) * 100.0;
+            self.raw[i] = (normalized.powf(0.85) * 100.0 * SPECTRUM_GAIN).clamp(0.0, 100.0);
         }
 
         smooth_neighbors(&self.raw, &mut self.spread);
