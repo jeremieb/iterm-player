@@ -2,7 +2,6 @@
 'use strict';
 
 const blessed = require('blessed');
-const contrib = require('blessed-contrib');
 const { AutoComplete } = require('enquirer');
 const FFT = require('fft.js');
 const { spawn } = require('child_process');
@@ -75,9 +74,12 @@ const screen = blessed.screen({
   terminal: BLESSED_TERM
 });
 
-const grid = new contrib.grid({ rows: 12, cols: 12, screen });
-
-const header = grid.set(0, 0, 2, 12, blessed.box, {
+const header = blessed.box({
+  parent: screen,
+  top: 0,
+  left: 0,
+  width: '100%',
+  height: '17%',
   label: 'Status',
   tags: true,
   padding: { left: 1, right: 1 },
@@ -85,7 +87,12 @@ const header = grid.set(0, 0, 2, 12, blessed.box, {
   border: 'line'
 });
 
-const spectrum = grid.set(2, 0, 7, 12, blessed.box, {
+const spectrum = blessed.box({
+  parent: screen,
+  top: '17%',
+  left: 0,
+  width: '100%',
+  height: '58%',
   label: 'Spectrum',
   border: 'line',
   style: {
@@ -94,7 +101,12 @@ const spectrum = grid.set(2, 0, 7, 12, blessed.box, {
   }
 });
 
-const input = grid.set(9, 0, 3, 12, blessed.textbox, {
+const input = blessed.textbox({
+  parent: screen,
+  top: '75%',
+  left: 0,
+  width: '100%',
+  height: '25%',
   label: 'Command',
   inputOnFocus: true,
   padding: { left: 1, right: 1 },
