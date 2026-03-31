@@ -1,0 +1,27 @@
+{
+  "name": "item-player",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://jeremieb@github.com/jeremieb/item-player.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/jeremieb/item-player/issues"
+  },
+  "homepage": "https://github.com/jeremieb/item-player#readme",
+  "dependencies": {
+    "blessed": "^0.1.81",
+    "blessed-contrib": "^4.11.0",
+    "enquirer": "^2.4.1",
+    "fft.js": "^4.0.4"
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "apple": {
+    "teamId": "PNJ2ZGDY4C",
+    "keyId": "XXXXXXXXXX",
+    "privateKeyPath": "./AuthKey_XXXXXXXXXX.p8"
+  }
+}
