@@ -9,12 +9,18 @@ The previous Node/Apple Music version is preserved unchanged in [`archive/`](/Us
 - Rust toolchain (`cargo`)
 - GStreamer
 
+This project currently assumes a macOS setup with Homebrew.
+
 Install GStreamer and Rust with Homebrew:
 
 ```sh
 brew install gstreamer
 brew install rust
 ```
+
+On Apple Silicon, Homebrew is usually installed under `/opt/homebrew`.
+
+On Intel Macs, Homebrew is usually installed under `/usr/local`.
 
 ## Run
 
@@ -34,6 +40,18 @@ Then run it from anywhere with:
 
 ```sh
 iterm-player
+```
+
+If the command is not found immediately, open a new terminal tab or run:
+
+```sh
+rehash
+```
+
+You can verify where Cargo installed it with:
+
+```sh
+which iterm-player
 ```
 
 If you update the repo later, reinstall the command with:
@@ -63,13 +81,26 @@ You can also run that binary directly without installing it globally:
 Or create a symlink so the command is available on your shell `PATH`:
 
 ```sh
-ln -sf "$(pwd)/target/release/iterm-player" /opt/homebrew/bin/iterm-player
+ln -sf "$(pwd)/target/release/iterm-player" "$(brew --prefix)/bin/iterm-player"
 ```
 
 Then run:
 
 ```sh
 iterm-player
+```
+
+If the command does not autocomplete or is not found immediately, run:
+
+```sh
+rehash
+```
+
+And verify the symlink with:
+
+```sh
+ls -l "$(brew --prefix)/bin/iterm-player"
+which iterm-player
 ```
 
 ## Commands
