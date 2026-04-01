@@ -2,7 +2,7 @@
 
 A terminal radio player written in Rust. It plays a small set of predefined stations through a single GStreamer pipeline and renders a live FFT-based spectrum from that same decoded audio stream.
 
-The previous Node/Apple Music version is preserved unchanged in [`archive/`](/Users/jeremieberduck/Developer/iterm-player/archive).
+<img width="1106" height="927" alt="Screenshot 2026-04-01 at 7 41 26 AM" src="https://github.com/user-attachments/assets/5cb6fa0b-50b1-4617-9ff1-cc059712d3b3" />
 
 ## Requirements
 
