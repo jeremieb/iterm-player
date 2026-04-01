@@ -1,8 +1,11 @@
-use std::io::{self};
+use std::fs;
+use std::io::{self, BufRead, BufReader, Write};
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
     mpsc::{self, Receiver, Sender},
+    Mutex,
 };
 use std::thread;
 use std::thread::JoinHandle;
@@ -25,7 +28,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
 };
 use rustfft::{FftPlanner, num_complex::Complex32};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 const SAMPLE_RATE: usize = 22_050;
 const FFT_SIZE: usize = 256;
@@ -37,6 +40,8 @@ const SPECTRUM_FPS: u64 = 60;
 const NOW_PLAYING_POLL_SECS: u64 = 15;
 const MAX_ANALYSIS_BACKLOG_FRAMES: usize = 1;
 const SPECTRUM_GAIN: f32 = 0.72;
+const CONTROL_SOCKET_PATH: &str = "/tmp/iterm-player.sock";
+const STATE_FILE_PATH: &str = "/tmp/iterm-player.json";
 
 #[derive(Clone, Copy)]
 struct Station {
@@ -100,15 +105,33 @@ struct App {
     playback: Option<PlaybackHandles>,
     spectrum_rx: Option<Receiver<Vec<u16>>>,
     now_playing_rx: Option<Receiver<String>>,
+    control_rx: Receiver<ControlCommand>,
+    shared_state: Arc<Mutex<WidgetState>>,
     last_spectrum_draw: Instant,
     dirty: bool,
 }
 
+#[derive(Clone)]
+struct WidgetState {
+    running: bool,
+    station_key: Option<String>,
+    station_label: Option<String>,
+    color: String,
+    pid: u32,
+}
+
+enum ControlCommand {
+    Play(String),
+    Stop,
+    Next,
+    Color(String),
+}
+
 impl App {
-    fn new() -> Self {
+    fn new(control_rx: Receiver<ControlCommand>, shared_state: Arc<Mutex<WidgetState>>) -> Self {
         Self {
             input: String::new(),
-            status: "Not playing\n\nCommands: /play [station], /stop, /quit".to_string(),
+            status: "Not playing\n\nCommands: /play [station], /next, /color [name], /stop, /quit".to_string(),
             now_playing: String::new(),
             spectrum: vec![0; SPECTRUM_BARS],
             theme: THEMES[0],
@@ -116,14 +139,17 @@ impl App {
             playback: None,
             spectrum_rx: None,
             now_playing_rx: None,
+            control_rx,
+            shared_state,
             last_spectrum_draw: Instant::now(),
             dirty: true,
         }
     }
 
     fn set_idle_status(&mut self) {
-        self.status = "Not playing\n\nCommands: /play [station], /stop, /quit".to_string();
+        self.status = "Not playing\n\nCommands: /play [station], /next, /color [name], /stop, /quit".to_string();
         self.dirty = true;
+        self.sync_shared_state();
     }
 
     fn set_playing_status(&mut self, station: Station) {
@@ -132,9 +158,10 @@ impl App {
             lines.push(format!("Now: {}", self.now_playing));
         }
         lines.push(format!("Stream: {}", station.stream));
-        lines.push("Commands: /play [station], /stop, /quit".to_string());
+        lines.push("Commands: /play [station], /next, /color [name], /stop, /quit".to_string());
         self.status = lines.join("\n");
         self.dirty = true;
+        self.sync_shared_state();
     }
 
     fn stop_playback(&mut self) {
@@ -150,6 +177,7 @@ impl App {
         self.spectrum.fill(0);
         self.set_idle_status();
         self.dirty = true;
+        self.sync_shared_state();
     }
 
     fn start_playback(&mut self, station: Station) {
@@ -173,9 +201,14 @@ impl App {
         });
         self.spectrum_rx = Some(spectrum_rx);
         self.now_playing_rx = Some(now_playing_rx);
+        self.sync_shared_state();
     }
 
     fn process_updates(&mut self) {
+        while let Ok(command) = self.control_rx.try_recv() {
+            self.execute_control_command(command);
+        }
+
         if let Some(rx) = &self.now_playing_rx {
             let mut latest = None;
             while let Ok(value) = rx.try_recv() {
@@ -187,6 +220,7 @@ impl App {
                     self.set_playing_status(station);
                 }
                 self.dirty = true;
+                self.sync_shared_state();
             }
         }
 
@@ -201,18 +235,72 @@ impl App {
             }
         }
     }
+
+    fn execute_control_command(&mut self, command: ControlCommand) {
+        match command {
+            ControlCommand::Play(query) => {
+                if let Some(station) = match_station(&query) {
+                    self.start_playback(station);
+                }
+            }
+            ControlCommand::Stop => self.stop_playback(),
+            ControlCommand::Next => {
+                let station = next_station(self.current_station);
+                self.start_playback(station);
+            }
+            ControlCommand::Color(query) => {
+                if let Some(theme) = THEMES.iter().copied().find(|theme| {
+                    theme.name == query || theme.name.starts_with(&query)
+                }) {
+                    self.theme = theme;
+                    if let Some(station) = self.current_station {
+                        self.set_playing_status(station);
+                    } else {
+                        self.set_idle_status();
+                    }
+                    self.sync_shared_state();
+                }
+            }
+        }
+    }
+
+    fn sync_shared_state(&self) {
+        if let Ok(mut state) = self.shared_state.lock() {
+            state.running = self.current_station.is_some();
+            state.station_key = self.current_station.map(|station| station.key.to_string());
+            state.station_label = self.current_station.map(|station| station.label.to_string());
+            state.color = self.theme.name.to_string();
+            state.pid = std::process::id();
+            let _ = write_widget_state(&state);
+        }
+    }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     configure_gstreamer_env();
     gst::init()?;
-    let mut app = App::new();
+    let (control_tx, control_rx) = mpsc::channel();
+    let shared_state = Arc::new(Mutex::new(WidgetState {
+        running: false,
+        station_key: None,
+        station_label: None,
+        color: THEMES[0].name.to_string(),
+        pid: std::process::id(),
+    }));
+    let control_server_stop = Arc::new(AtomicBool::new(false));
+    let control_server = spawn_control_server(control_tx, Arc::clone(&shared_state), Arc::clone(&control_server_stop));
+    let mut app = App::new(control_rx, Arc::clone(&shared_state));
+    app.sync_shared_state();
     let mut terminal = init_terminal()?;
 
     let result = run_app(&mut terminal, &mut app);
 
     restore_terminal(&mut terminal)?;
     app.stop_playback();
+    control_server_stop.store(true, Ordering::SeqCst);
+    let _ = UnixStream::connect(CONTROL_SOCKET_PATH);
+    let _ = fs::remove_file(CONTROL_SOCKET_PATH);
+    let _ = control_server.join();
     result
 }
 
@@ -464,6 +552,10 @@ fn execute_command(app: &mut App) {
             std::process::exit(0);
         }
         "/stop" => app.stop_playback(),
+        "/next" => {
+            let station = next_station(app.current_station);
+            app.start_playback(station);
+        }
         "/color" => {
             let names = THEMES.iter().map(|theme| theme.name).collect::<Vec<_>>().join(", ");
             app.status = format!("Usage: /color [name]\nAvailable: {names}");
@@ -493,14 +585,7 @@ fn execute_command(app: &mut App) {
         }
         _ if command.starts_with("/play ") => {
             let query = command.trim_start_matches("/play ").trim().to_lowercase();
-            let station = STATIONS.iter().copied().find(|station| {
-                station.key == query
-                    || station.label.to_lowercase() == query
-                    || station.key.starts_with(&query)
-                    || station.label.to_lowercase().starts_with(&query)
-            });
-
-            if let Some(station) = station {
+            if let Some(station) = match_station(&query) {
                 app.start_playback(station);
             } else {
                 let available = STATIONS.iter().map(|s| s.key).collect::<Vec<_>>().join(", ");
@@ -508,7 +593,7 @@ fn execute_command(app: &mut App) {
             }
         }
         _ => {
-            app.status = "Commands: /play [station], /stop, /quit".to_string();
+            app.status = "Commands: /play [station], /next, /stop, /quit".to_string();
             app.dirty = true;
         }
     }
@@ -535,7 +620,7 @@ fn autocomplete_input(app: &mut App) {
         return;
     }
 
-    let commands = ["/play", "/stop", "/color", "/quit", "/q"];
+    let commands = ["/play", "/next", "/stop", "/color", "/quit", "/q"];
     let query = trimmed.to_lowercase();
     if let Some(completion) = complete_from_candidates(&query, &commands) {
         app.input = completion;
@@ -561,6 +646,109 @@ fn complete_from_candidates(query: &str, candidates: &[&str]) -> Option<String> 
     }
 
     Some(longest_common_prefix(&matches))
+}
+
+fn match_station(query: &str) -> Option<Station> {
+    STATIONS.iter().copied().find(|station| {
+        station.key == query
+            || station.label.to_lowercase() == query
+            || station.key.starts_with(query)
+            || station.label.to_lowercase().starts_with(query)
+    })
+}
+
+fn next_station(current: Option<Station>) -> Station {
+    if let Some(current) = current {
+        let index = STATIONS
+            .iter()
+            .position(|station| station.key == current.key)
+            .unwrap_or(0);
+        STATIONS[(index + 1) % STATIONS.len()]
+    } else {
+        STATIONS[0]
+    }
+}
+
+fn spawn_control_server(
+    tx: Sender<ControlCommand>,
+    shared_state: Arc<Mutex<WidgetState>>,
+    stop_flag: Arc<AtomicBool>,
+) -> JoinHandle<()> {
+    let _ = fs::remove_file(CONTROL_SOCKET_PATH);
+    thread::spawn(move || {
+        let Ok(listener) = UnixListener::bind(CONTROL_SOCKET_PATH) else {
+            return;
+        };
+        let _ = listener.set_nonblocking(true);
+
+        while !stop_flag.load(Ordering::SeqCst) {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    let _ = handle_control_stream(stream, &tx, &shared_state);
+                }
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(25));
+                }
+                Err(_) => break,
+            }
+        }
+    })
+}
+
+fn handle_control_stream(
+    mut stream: UnixStream,
+    tx: &Sender<ControlCommand>,
+    shared_state: &Arc<Mutex<WidgetState>>,
+) -> io::Result<()> {
+    let mut command = String::new();
+    {
+        let mut reader = BufReader::new(&stream);
+        reader.read_line(&mut command)?;
+    }
+    let command = command.trim();
+
+    let response = if command == "status" {
+        if let Ok(state) = shared_state.lock() {
+            serde_json::to_string(&json!({
+                "running": state.running,
+                "station_key": state.station_key,
+                "station_label": state.station_label,
+                "color": state.color,
+                "pid": state.pid,
+            }))
+            .unwrap_or_else(|_| "{\"running\":false}".to_string())
+        } else {
+            "{\"running\":false}".to_string()
+        }
+    } else if command == "stop" {
+        let _ = tx.send(ControlCommand::Stop);
+        "{\"ok\":true}".to_string()
+    } else if command == "next" {
+        let _ = tx.send(ControlCommand::Next);
+        "{\"ok\":true}".to_string()
+    } else if let Some(query) = command.strip_prefix("play ") {
+        let _ = tx.send(ControlCommand::Play(query.trim().to_lowercase()));
+        "{\"ok\":true}".to_string()
+    } else if let Some(query) = command.strip_prefix("color ") {
+        let _ = tx.send(ControlCommand::Color(query.trim().to_lowercase()));
+        "{\"ok\":true}".to_string()
+    } else {
+        "{\"ok\":false,\"error\":\"unknown command\"}".to_string()
+    };
+
+    writeln!(stream, "{response}")?;
+    Ok(())
+}
+
+fn write_widget_state(state: &WidgetState) -> io::Result<()> {
+    let data = json!({
+        "running": state.running,
+        "station_key": state.station_key,
+        "station_label": state.station_label,
+        "color": state.color,
+        "pid": state.pid,
+    });
+    fs::write(STATE_FILE_PATH, serde_json::to_vec_pretty(&data).unwrap_or_default())
 }
 
 fn longest_common_prefix(candidates: &[&str]) -> String {
