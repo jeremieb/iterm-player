@@ -2,7 +2,7 @@
 
 A terminal radio player written in Rust. It plays a small set of predefined stations through a single GStreamer pipeline and renders a live FFT-based spectrum from that same decoded audio stream.
 
-<img width="1106" height="927" alt="Screenshot 2026-04-01 at 7 41 26 AM" src="https://github.com/user-attachments/assets/5cb6fa0b-50b1-4617-9ff1-cc059712d3b3" />
+<img width="1106" height="927" alt="Screenshot 2026-04-01 at 8 18 14 AM" src="https://github.com/user-attachments/assets/fb8c46ba-82ed-478e-94b8-e579e768259b" />
 
 ## Requirements
 
@@ -129,7 +129,10 @@ Running `/color` without a value shows the available color names.
 
 ## iTerm2 Widget
 
-The repo includes an iTerm2 Python status bar script at [iterm2/iterm_player_statusbar.py](/Users/jeremieberduck/Developer/iterm-player/iterm2/iterm_player_statusbar.py).
+The repo includes an iTerm2 Python status bar script at `iterm2/iterm_player_statusbar.py`.
+
+![widget](https://github.com/user-attachments/assets/e82e6ba0-2098-488f-a55b-eeb327efde47)
+
 
 It provides one compact status bar widget in this order:
 
