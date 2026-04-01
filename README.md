@@ -60,6 +60,8 @@ If you update the repo later, reinstall the command with:
 cargo install --path . --force
 ```
 
+Make sure `~/.cargo/bin` is on your shell `PATH` if you installed with `cargo install --path .`. The included iTerm2 widget launches `iterm-player` through a login `zsh` shell, so whatever works in a normal terminal should also work from the widget.
+
 ## Build
 
 ```sh
@@ -124,6 +126,48 @@ Running `/color` without a value shows the available color names.
 - `Tab` completes commands such as `/pl` -> `/play `
 - `Tab` also completes station keys after `/play `
 - `Tab` completes color names after `/color `
+
+## iTerm2 Widget
+
+The repo includes an iTerm2 Python status bar script at [iterm2/iterm_player_statusbar.py](/Users/jeremieberduck/Developer/iterm-player/iterm2/iterm_player_statusbar.py).
+
+It provides one compact status bar widget in this order:
+
+- `▶ or ■ | ▶▶ | Radio Name`
+
+When the player is stopped, the first control shows `▶`. When the player is running, it shows `■`. Clicking the widget opens a small popover with `▶/■` and `▶▶` buttons. The widget only controls the running player through the local Unix socket at `/tmp/iterm-player.sock`. If no player is running, using the widget starts a new iTerm2 window, launches `iterm-player`, and starts the first station.
+
+### Install The Widget
+
+1. Create the iTerm2 AutoLaunch directory if it does not already exist:
+
+```sh
+mkdir -p "$HOME/Library/Application Support/iTerm2/Scripts/AutoLaunch"
+```
+
+2. Symlink the script from this repo into AutoLaunch:
+
+```sh
+ln -sf "$(pwd)/iterm2/iterm_player_statusbar.py" "$HOME/Library/Application Support/iTerm2/Scripts/AutoLaunch/iterm_player_statusbar.py"
+```
+
+3. Restart iTerm2, or launch the script manually from `Scripts > Manage`.
+
+4. In iTerm2, enable the status bar for your profile:
+   `Settings > Profiles > Session > Status Bar Enabled`
+
+5. Open the status bar configuration:
+   `Settings > Profiles > Session > Configure Status Bar...`
+
+6. Add this component:
+
+- `iTerm Player`
+
+### Widget Notes
+
+- The widget expects the `iterm-player` command to work in a normal login shell.
+- If the widget shows a bug icon or does not update, open `Scripts > Manage > Console` in iTerm2 to inspect Python script errors.
+- The widget reads `/tmp/iterm-player.json` for display state and sends commands to `/tmp/iterm-player.sock`.
 
 ## Customization
 
