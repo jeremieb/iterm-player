@@ -42,6 +42,7 @@ const MAX_ANALYSIS_BACKLOG_FRAMES: usize = 1;
 const SPECTRUM_GAIN: f32 = 0.72;
 const CONTROL_SOCKET_PATH: &str = "/tmp/iterm-player.sock";
 const STATE_FILE_PATH: &str = "/tmp/iterm-player.json";
+const DEFAULT_VOLUME_STEP: u8 = 5;
 
 #[derive(Clone, Copy)]
 struct Station {
@@ -107,6 +108,8 @@ struct App {
     now_playing_rx: Option<Receiver<String>>,
     control_rx: Receiver<ControlCommand>,
     shared_state: Arc<Mutex<WidgetState>>,
+    volume_step: u8,
+    volume_level: Arc<Mutex<f64>>,
     last_spectrum_draw: Instant,
     dirty: bool,
 }
@@ -117,6 +120,7 @@ struct WidgetState {
     station_key: Option<String>,
     station_label: Option<String>,
     color: String,
+    volume: u8,
     pid: u32,
 }
 
@@ -125,13 +129,17 @@ enum ControlCommand {
     Stop,
     Next,
     Color(String),
+    Volume(u8),
 }
 
 impl App {
     fn new(control_rx: Receiver<ControlCommand>, shared_state: Arc<Mutex<WidgetState>>) -> Self {
+        let volume_step = DEFAULT_VOLUME_STEP;
         Self {
             input: String::new(),
-            status: "Not playing\n\nCommands: /play [station], /next, /color [name], /stop, /quit".to_string(),
+            status: format!(
+                "Not playing\nVolume: {volume_step}/10\n\nCommands: /play [station], /next, /color [name], /volume [0-10], /stop, /quit"
+            ),
             now_playing: String::new(),
             spectrum: vec![0; SPECTRUM_BARS],
             theme: THEMES[0],
@@ -141,13 +149,18 @@ impl App {
             now_playing_rx: None,
             control_rx,
             shared_state,
+            volume_step,
+            volume_level: Arc::new(Mutex::new(step_to_volume(volume_step))),
             last_spectrum_draw: Instant::now(),
             dirty: true,
         }
     }
 
     fn set_idle_status(&mut self) {
-        self.status = "Not playing\n\nCommands: /play [station], /next, /color [name], /stop, /quit".to_string();
+        self.status = format!(
+            "Not playing\nVolume: {}/10\n\nCommands: /play [station], /next, /color [name], /volume [0-10], /stop, /quit",
+            self.volume_step
+        );
         self.dirty = true;
         self.sync_shared_state();
     }
@@ -157,8 +170,9 @@ impl App {
         if !self.now_playing.is_empty() {
             lines.push(format!("Now: {}", self.now_playing));
         }
+        lines.push(format!("Volume: {}/10", self.volume_step));
         lines.push(format!("Stream: {}", station.stream));
-        lines.push("Commands: /play [station], /next, /color [name], /stop, /quit".to_string());
+        lines.push("Commands: /play [station], /next, /color [name], /volume [0-10], /stop, /quit".to_string());
         self.status = lines.join("\n");
         self.dirty = true;
         self.sync_shared_state();
@@ -186,7 +200,12 @@ impl App {
         let stop_flag = Arc::new(AtomicBool::new(false));
         let (spectrum_tx, spectrum_rx) = mpsc::channel();
         let (now_playing_tx, now_playing_rx) = mpsc::channel();
-        let worker = spawn_gstreamer_worker(station.stream, spectrum_tx, Arc::clone(&stop_flag));
+        let worker = spawn_gstreamer_worker(
+            station.stream,
+            spectrum_tx,
+            Arc::clone(&stop_flag),
+            Arc::clone(&self.volume_level),
+        );
 
         spawn_now_playing_worker(station, now_playing_tx, Arc::clone(&stop_flag));
 
@@ -261,7 +280,22 @@ impl App {
                     self.sync_shared_state();
                 }
             }
+            ControlCommand::Volume(step) => self.set_volume(step),
         }
+    }
+
+    fn set_volume(&mut self, step: u8) {
+        self.volume_step = step.min(10);
+        if let Ok(mut volume) = self.volume_level.lock() {
+            *volume = step_to_volume(self.volume_step);
+        }
+
+        if let Some(station) = self.current_station {
+            self.set_playing_status(station);
+        } else {
+            self.set_idle_status();
+        }
+        self.sync_shared_state();
     }
 
     fn sync_shared_state(&self) {
@@ -270,6 +304,7 @@ impl App {
             state.station_key = self.current_station.map(|station| station.key.to_string());
             state.station_label = self.current_station.map(|station| station.label.to_string());
             state.color = self.theme.name.to_string();
+            state.volume = self.volume_step;
             state.pid = std::process::id();
             let _ = write_widget_state(&state);
         }
@@ -285,6 +320,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         station_key: None,
         station_label: None,
         color: THEMES[0].name.to_string(),
+        volume: DEFAULT_VOLUME_STEP,
         pid: std::process::id(),
     }));
     let control_server_stop = Arc::new(AtomicBool::new(false));
@@ -561,6 +597,10 @@ fn execute_command(app: &mut App) {
             app.status = format!("Usage: /color [name]\nAvailable: {names}");
             app.dirty = true;
         }
+        "/volume" => {
+            app.status = format!("Usage: /volume [0-10]\nCurrent: {}/10", app.volume_step);
+            app.dirty = true;
+        }
         "/play" => {
             let available = STATIONS.iter().map(|s| s.key).collect::<Vec<_>>().join(", ");
             app.status = format!("Usage: /play [station]\nAvailable: {available}");
@@ -592,8 +632,18 @@ fn execute_command(app: &mut App) {
                 app.status = format!("Unknown station: {query}\nAvailable: {available}");
             }
         }
+        _ if command.starts_with("/volume ") => {
+            let query = command.trim_start_matches("/volume ").trim();
+            match query.parse::<u8>() {
+                Ok(step) if step <= 10 => app.set_volume(step),
+                _ => {
+                    app.status = format!("Invalid volume: {query}\nUsage: /volume [0-10]");
+                    app.dirty = true;
+                }
+            }
+        }
         _ => {
-            app.status = "Commands: /play [station], /next, /stop, /quit".to_string();
+            app.status = "Commands: /play [station], /next, /color [name], /volume [0-10], /stop, /quit".to_string();
             app.dirty = true;
         }
     }
@@ -620,11 +670,11 @@ fn autocomplete_input(app: &mut App) {
         return;
     }
 
-    let commands = ["/play", "/next", "/stop", "/color", "/quit", "/q"];
+    let commands = ["/play", "/next", "/stop", "/color", "/volume", "/quit", "/q"];
     let query = trimmed.to_lowercase();
     if let Some(completion) = complete_from_candidates(&query, &commands) {
         app.input = completion;
-        if app.input == "/play" {
+        if app.input == "/play" || app.input == "/volume" {
             app.input.push(' ');
         }
     }
@@ -714,6 +764,7 @@ fn handle_control_stream(
                 "station_key": state.station_key,
                 "station_label": state.station_label,
                 "color": state.color,
+                "volume": state.volume,
                 "pid": state.pid,
             }))
             .unwrap_or_else(|_| "{\"running\":false}".to_string())
@@ -732,6 +783,14 @@ fn handle_control_stream(
     } else if let Some(query) = command.strip_prefix("color ") {
         let _ = tx.send(ControlCommand::Color(query.trim().to_lowercase()));
         "{\"ok\":true}".to_string()
+    } else if let Some(query) = command.strip_prefix("volume ") {
+        match query.trim().parse::<u8>() {
+            Ok(step) if step <= 10 => {
+                let _ = tx.send(ControlCommand::Volume(step));
+                "{\"ok\":true}".to_string()
+            }
+            _ => "{\"ok\":false,\"error\":\"invalid volume\"}".to_string(),
+        }
     } else {
         "{\"ok\":false,\"error\":\"unknown command\"}".to_string()
     };
@@ -746,9 +805,14 @@ fn write_widget_state(state: &WidgetState) -> io::Result<()> {
         "station_key": state.station_key,
         "station_label": state.station_label,
         "color": state.color,
+        "volume": state.volume,
         "pid": state.pid,
     });
     fs::write(STATE_FILE_PATH, serde_json::to_vec_pretty(&data).unwrap_or_default())
+}
+
+fn step_to_volume(step: u8) -> f64 {
+    (step.min(10) as f64) / 10.0
 }
 
 fn longest_common_prefix(candidates: &[&str]) -> String {
@@ -788,20 +852,30 @@ fn restore_terminal(
     Ok(())
 }
 
-fn spawn_gstreamer_worker(url: &'static str, tx: Sender<Vec<u16>>, stop_flag: Arc<AtomicBool>) -> JoinHandle<()> {
+fn spawn_gstreamer_worker(
+    url: &'static str,
+    tx: Sender<Vec<u16>>,
+    stop_flag: Arc<AtomicBool>,
+    volume_level: Arc<Mutex<f64>>,
+) -> JoinHandle<()> {
     thread::spawn(move || {
+        let initial_volume = volume_level
+            .lock()
+            .map(|volume| *volume)
+            .unwrap_or(step_to_volume(DEFAULT_VOLUME_STEP));
         let pipeline_description = format!(
             concat!(
                 "pipeline name=player ",
                 "uridecodebin uri=\"{url}\" name=src ",
                 "src. ! queue ! audioconvert ! audioresample ! tee name=split ",
-                "split. ! queue ! autoaudiosink sync=false ",
+                "split. ! queue ! volume name=player_volume volume={volume} ! autoaudiosink sync=false ",
                 "split. ! queue leaky=downstream max-size-buffers=1 max-size-bytes=0 max-size-time=0 ",
                 "! audio/x-raw,format=F32LE,channels=1,rate={rate} ",
                 "! appsink name=spectrum_sink emit-signals=false sync=false max-buffers=1 drop=true",
             ),
             url = url,
             rate = SAMPLE_RATE,
+            volume = initial_volume,
         );
 
         let Ok(element) = gst::parse::launch(&pipeline_description) else {
@@ -814,10 +888,15 @@ fn spawn_gstreamer_worker(url: &'static str, tx: Sender<Vec<u16>>, stop_flag: Ar
             let _ = pipeline.set_state(gst::State::Null);
             return;
         };
+        let Some(volume_element) = pipeline.by_name("player_volume") else {
+            let _ = pipeline.set_state(gst::State::Null);
+            return;
+        };
         let Ok(appsink) = appsink_element.downcast::<gst_app::AppSink>() else {
             let _ = pipeline.set_state(gst::State::Null);
             return;
         };
+        let mut applied_volume = initial_volume;
 
         let _ = pipeline.set_state(gst::State::Playing);
         let Some(bus) = pipeline.bus() else {
@@ -843,6 +922,12 @@ fn spawn_gstreamer_worker(url: &'static str, tx: Sender<Vec<u16>>, stop_flag: Ar
 
             if stop_flag.load(Ordering::SeqCst) {
                 break;
+            }
+
+            let desired_volume = volume_level.lock().map(|volume| *volume).unwrap_or(applied_volume);
+            if (desired_volume - applied_volume).abs() > f64::EPSILON {
+                volume_element.set_property("volume", desired_volume);
+                applied_volume = desired_volume;
             }
 
             if let Some(sample) = appsink.try_pull_sample(gst::ClockTime::from_mseconds(10)) {
