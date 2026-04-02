@@ -114,6 +114,7 @@ which iterm-player
 - `/color red`
 - `/color yellow`
 - `/color cyan`
+- `/volume 3`
 - `/stop`
 - `/quit` or `/q`
 
@@ -121,11 +122,14 @@ Running `/play` without a station shows the available station keys in the status
 
 Running `/color` without a value shows the available color names.
 
+Running `/volume` without a value shows the current volume and expected range.
+
 ## Input helpers
 
 - `Tab` completes commands such as `/pl` -> `/play `
 - `Tab` also completes station keys after `/play `
 - `Tab` completes color names after `/color `
+- `Tab` completes `/volume ` like the other top-level commands
 
 ## iTerm2 Widget
 
@@ -190,6 +194,8 @@ Available colors:
 - `pink`
 - `magenta`
 - `white`
+
+The player volume can also be changed at runtime with `/volume [0-10]`, where `0` is muted and `10` is full volume.
 
 ## Notes
 
