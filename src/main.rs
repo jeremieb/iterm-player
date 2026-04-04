@@ -377,8 +377,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let result = run_app(&mut terminal, &mut app);
 
     restore_terminal(&mut terminal)?;
-    App::set_tab_title("");
     app.stop_playback();
+    App::set_tab_title("");
     control_server_stop.store(true, Ordering::SeqCst);
     let _ = UnixStream::connect(CONTROL_SOCKET_PATH);
     let _ = fs::remove_file(CONTROL_SOCKET_PATH);
