@@ -166,11 +166,17 @@ impl App {
         }
     }
 
+    fn set_tab_title(title: &str) {
+        print!("\x1b]1;{}\x07", title);
+        let _ = io::stdout().flush();
+    }
+
     fn set_idle_status(&mut self) {
         self.status = format!(
             "Not playing\nVolume: {}/10\n\nCommands: /play [station], /next, /color [name], /volume [0-10], /stop, /quit",
             self.volume_step
         );
+        Self::set_tab_title("iterm-player");
         self.dirty = true;
         self.sync_shared_state();
     }
@@ -371,6 +377,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let result = run_app(&mut terminal, &mut app);
 
     restore_terminal(&mut terminal)?;
+    App::set_tab_title("");
     app.stop_playback();
     control_server_stop.store(true, Ordering::SeqCst);
     let _ = UnixStream::connect(CONTROL_SOCKET_PATH);
@@ -425,6 +432,15 @@ fn run_app(
 
         if app.dirty && app.last_spectrum_draw.elapsed() >= Duration::from_millis(1000 / SPECTRUM_FPS) {
             terminal.draw(|frame| draw_ui(frame, app))?;
+            if let Some(station) = app.current_station {
+                let anim = spectrum_tab_animation(&app.spectrum);
+                let title = if app.now_playing.is_empty() {
+                    format!("{} {}", anim, station.label)
+                } else {
+                    format!("{} {} — {}", anim, station.label, app.now_playing)
+                };
+                App::set_tab_title(&title);
+            }
             app.last_spectrum_draw = Instant::now();
             app.dirty = false;
             app.fps_frame_count += 1;
@@ -524,6 +540,22 @@ fn draw_ui(frame: &mut ratatui::Frame<'_>, app: &App) {
     let cursor_x = chunks[2].x + 1 + app.input.chars().count() as u16;
     let cursor_y = chunks[2].y + 1;
     frame.set_cursor_position((cursor_x, cursor_y));
+}
+
+fn spectrum_tab_animation(spectrum: &[u16]) -> String {
+    const BLOCKS: &[char] = &['▁', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    const SAMPLES: usize = 6;
+    let len = spectrum.len();
+    if len == 0 {
+        return String::new();
+    }
+    (0..SAMPLES)
+        .map(|i| {
+            let idx = i * (len - 1) / (SAMPLES - 1);
+            let val = spectrum[idx].min(100) as usize;
+            BLOCKS[val * (BLOCKS.len() - 1) / 100]
+        })
+        .collect()
 }
 
 fn render_spectrum_text(bins: &[u16], width: u16, height: u16) -> Vec<Line<'static>> {
