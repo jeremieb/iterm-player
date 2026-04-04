@@ -106,12 +106,17 @@ struct App {
     playback: Option<PlaybackHandles>,
     spectrum_rx: Option<Receiver<Vec<u16>>>,
     now_playing_rx: Option<Receiver<String>>,
+    bitrate_rx: Option<Receiver<u32>>,
     control_rx: Receiver<ControlCommand>,
     shared_state: Arc<Mutex<WidgetState>>,
     volume_step: u8,
     volume_level: Arc<Mutex<f64>>,
     last_spectrum_draw: Instant,
     dirty: bool,
+    current_bitrate: Option<u32>,
+    fps_frame_count: u32,
+    fps_window_start: Instant,
+    current_fps: u32,
 }
 
 #[derive(Clone)]
@@ -147,12 +152,17 @@ impl App {
             playback: None,
             spectrum_rx: None,
             now_playing_rx: None,
+            bitrate_rx: None,
             control_rx,
             shared_state,
             volume_step,
             volume_level: Arc::new(Mutex::new(step_to_volume(volume_step))),
             last_spectrum_draw: Instant::now(),
             dirty: true,
+            current_bitrate: None,
+            fps_frame_count: 0,
+            fps_window_start: Instant::now(),
+            current_fps: 0,
         }
     }
 
@@ -172,6 +182,12 @@ impl App {
         }
         lines.push(format!("Volume: {}/10", self.volume_step));
         lines.push(format!("Stream: {}", station.stream));
+        if self.current_fps > 0 {
+            lines.push(format!("FPS: {}", self.current_fps));
+        }
+        if let Some(kbps) = self.current_bitrate {
+            lines.push(format!("Bitrate: {} kbps", kbps));
+        }
         lines.push("Commands: /play [station], /next, /color [name], /volume [0-10], /stop, /quit".to_string());
         self.status = lines.join("\n");
         self.dirty = true;
@@ -187,6 +203,8 @@ impl App {
         self.current_station = None;
         self.spectrum_rx = None;
         self.now_playing_rx = None;
+        self.bitrate_rx = None;
+        self.current_bitrate = None;
         self.now_playing.clear();
         self.spectrum.fill(0);
         self.set_idle_status();
@@ -200,9 +218,11 @@ impl App {
         let stop_flag = Arc::new(AtomicBool::new(false));
         let (spectrum_tx, spectrum_rx) = mpsc::channel();
         let (now_playing_tx, now_playing_rx) = mpsc::channel();
+        let (bitrate_tx, bitrate_rx) = mpsc::channel();
         let worker = spawn_gstreamer_worker(
             station.stream,
             spectrum_tx,
+            bitrate_tx,
             Arc::clone(&stop_flag),
             Arc::clone(&self.volume_level),
         );
@@ -212,6 +232,7 @@ impl App {
         self.current_station = Some(station);
         self.now_playing.clear();
         self.spectrum.fill(0);
+        self.current_bitrate = None;
         self.set_playing_status(station);
         self.dirty = true;
         self.playback = Some(PlaybackHandles {
@@ -220,6 +241,7 @@ impl App {
         });
         self.spectrum_rx = Some(spectrum_rx);
         self.now_playing_rx = Some(now_playing_rx);
+        self.bitrate_rx = Some(bitrate_rx);
         self.sync_shared_state();
     }
 
@@ -251,6 +273,23 @@ impl App {
             if let Some(spectrum) = latest {
                 self.spectrum = spectrum;
                 self.dirty = true;
+            }
+        }
+
+        if let Some(rx) = &self.bitrate_rx {
+            let mut latest = None;
+            while let Ok(value) = rx.try_recv() {
+                latest = Some(value);
+            }
+            if let Some(bps) = latest {
+                let kbps = bps / 1000;
+                if self.current_bitrate != Some(kbps) {
+                    self.current_bitrate = Some(kbps);
+                    if let Some(station) = self.current_station {
+                        self.set_playing_status(station);
+                    }
+                    self.dirty = true;
+                }
             }
         }
     }
@@ -388,6 +427,20 @@ fn run_app(
             terminal.draw(|frame| draw_ui(frame, app))?;
             app.last_spectrum_draw = Instant::now();
             app.dirty = false;
+            app.fps_frame_count += 1;
+            let fps_elapsed = app.fps_window_start.elapsed();
+            if fps_elapsed >= Duration::from_secs(1) {
+                let fps = (app.fps_frame_count as f32 / fps_elapsed.as_secs_f32()).round() as u32;
+                if app.current_fps != fps {
+                    app.current_fps = fps;
+                    if let Some(station) = app.current_station {
+                        app.set_playing_status(station);
+                    }
+                    app.dirty = true;
+                }
+                app.fps_frame_count = 0;
+                app.fps_window_start = Instant::now();
+            }
         }
 
         if event::poll(Duration::from_millis(5))? {
@@ -855,6 +908,7 @@ fn restore_terminal(
 fn spawn_gstreamer_worker(
     url: &'static str,
     tx: Sender<Vec<u16>>,
+    bitrate_tx: Sender<u32>,
     stop_flag: Arc<AtomicBool>,
     volume_level: Arc<Mutex<f64>>,
 ) -> JoinHandle<()> {
@@ -915,6 +969,14 @@ fn spawn_gstreamer_worker(
                     gst::MessageView::Error(_) | gst::MessageView::Eos(_) => {
                         stop_flag.store(true, Ordering::SeqCst);
                         break;
+                    }
+                    gst::MessageView::Tag(tag_msg) => {
+                        let tags = tag_msg.tags();
+                        if let Some(bitrate) = tags.get::<gst::tags::Bitrate>() {
+                            let _ = bitrate_tx.send(bitrate.get());
+                        } else if let Some(bitrate) = tags.get::<gst::tags::NominalBitrate>() {
+                            let _ = bitrate_tx.send(bitrate.get());
+                        }
                     }
                     _ => {}
                 }
