@@ -85,7 +85,7 @@ struct Theme {
     color: Color,
 }
 
-const THEMES: [Theme; 8] = [
+const THEMES: [Theme; 12] = [
     Theme { name: "cyan", color: Color::Cyan },
     Theme { name: "red", color: Color::Red },
     Theme { name: "yellow", color: Color::Yellow },
@@ -94,6 +94,10 @@ const THEMES: [Theme; 8] = [
     Theme { name: "pink", color: Color::LightMagenta },
     Theme { name: "magenta", color: Color::Magenta },
     Theme { name: "white", color: Color::White },
+    Theme { name: "grey", color: Color::Gray },
+    Theme { name: "dark-grey", color: Color::DarkGray },
+    Theme { name: "orange", color: Color::Rgb(255, 140, 0) },
+    Theme { name: "brown", color: Color::Rgb(160, 82, 45) },
 ];
 
 struct App {
