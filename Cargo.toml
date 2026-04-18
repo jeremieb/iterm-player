@@ -11,3 +11,6 @@ ratatui = "0.29"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 rustfft = "6.4"
 serde_json = "1.0"
+souvlaki = "0.8"
+cocoa = "0.24"
+objc = "0.2"

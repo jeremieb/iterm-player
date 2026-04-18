@@ -198,6 +198,7 @@ Available colors:
 - `dark-grey`
 - `orange`
 - `brown`
+- `rainbow`
 
 The player volume can also be changed at runtime with `/volume [0-10]`, where `0` is muted and `10` is full volume.
 

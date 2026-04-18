@@ -29,6 +29,9 @@ use ratatui::{
 };
 use rustfft::{FftPlanner, num_complex::Complex32};
 use serde_json::{Value, json};
+use souvlaki::{MediaControlEvent, MediaControls, PlatformConfig};
+use cocoa::base::id;
+use objc::{class, msg_send, sel, sel_impl};
 
 const SAMPLE_RATE: usize = 22_050;
 const FFT_SIZE: usize = 256;
@@ -82,22 +85,29 @@ struct PlaybackHandles {
 #[derive(Clone, Copy)]
 struct Theme {
     name: &'static str,
-    color: Color,
+    palette: ThemePalette,
 }
 
-const THEMES: [Theme; 12] = [
-    Theme { name: "cyan", color: Color::Cyan },
-    Theme { name: "red", color: Color::Red },
-    Theme { name: "yellow", color: Color::Yellow },
-    Theme { name: "green", color: Color::Green },
-    Theme { name: "blue", color: Color::Blue },
-    Theme { name: "pink", color: Color::LightMagenta },
-    Theme { name: "magenta", color: Color::Magenta },
-    Theme { name: "white", color: Color::White },
-    Theme { name: "grey", color: Color::Gray },
-    Theme { name: "dark-grey", color: Color::DarkGray },
-    Theme { name: "orange", color: Color::Rgb(255, 140, 0) },
-    Theme { name: "brown", color: Color::Rgb(160, 82, 45) },
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ThemePalette {
+    Solid(Color),
+    AnimatedRainbow,
+}
+
+const THEMES: [Theme; 13] = [
+    Theme { name: "cyan", palette: ThemePalette::Solid(Color::Cyan) },
+    Theme { name: "red", palette: ThemePalette::Solid(Color::Red) },
+    Theme { name: "yellow", palette: ThemePalette::Solid(Color::Yellow) },
+    Theme { name: "green", palette: ThemePalette::Solid(Color::Green) },
+    Theme { name: "blue", palette: ThemePalette::Solid(Color::Blue) },
+    Theme { name: "pink", palette: ThemePalette::Solid(Color::LightMagenta) },
+    Theme { name: "magenta", palette: ThemePalette::Solid(Color::Magenta) },
+    Theme { name: "white", palette: ThemePalette::Solid(Color::White) },
+    Theme { name: "grey", palette: ThemePalette::Solid(Color::Gray) },
+    Theme { name: "dark-grey", palette: ThemePalette::Solid(Color::DarkGray) },
+    Theme { name: "orange", palette: ThemePalette::Solid(Color::Rgb(255, 140, 0)) },
+    Theme { name: "brown", palette: ThemePalette::Solid(Color::Rgb(160, 82, 45)) },
+    Theme { name: "rainbow", palette: ThemePalette::AnimatedRainbow },
 ];
 
 struct App {
@@ -115,12 +125,16 @@ struct App {
     shared_state: Arc<Mutex<WidgetState>>,
     volume_step: u8,
     volume_level: Arc<Mutex<f64>>,
+    started_at: Instant,
     last_spectrum_draw: Instant,
     dirty: bool,
     current_bitrate: Option<u32>,
     fps_frame_count: u32,
     fps_window_start: Instant,
     current_fps: u32,
+    media_controls: Option<MediaControls>,
+    last_station_key: Option<String>,
+    now_playing_confirmed: bool,
 }
 
 #[derive(Clone)]
@@ -137,12 +151,14 @@ enum ControlCommand {
     Play(String),
     Stop,
     Next,
+    Prev,
+    Toggle,
     Color(String),
     Volume(u8),
 }
 
 impl App {
-    fn new(control_rx: Receiver<ControlCommand>, shared_state: Arc<Mutex<WidgetState>>) -> Self {
+    fn new(control_rx: Receiver<ControlCommand>, shared_state: Arc<Mutex<WidgetState>>, media_controls: Option<MediaControls>) -> Self {
         let volume_step = DEFAULT_VOLUME_STEP;
         Self {
             input: String::new(),
@@ -161,12 +177,16 @@ impl App {
             shared_state,
             volume_step,
             volume_level: Arc::new(Mutex::new(step_to_volume(volume_step))),
+            started_at: Instant::now(),
             last_spectrum_draw: Instant::now(),
             dirty: true,
             current_bitrate: None,
             fps_frame_count: 0,
             fps_window_start: Instant::now(),
             current_fps: 0,
+            media_controls,
+            last_station_key: None,
+            now_playing_confirmed: false,
         }
     }
 
@@ -219,7 +239,9 @@ impl App {
         self.spectrum.fill(0);
         self.set_idle_status();
         self.dirty = true;
+        self.now_playing_confirmed = false;
         self.sync_shared_state();
+        clear_now_playing();
     }
 
     fn start_playback(&mut self, station: Station) {
@@ -240,6 +262,8 @@ impl App {
         spawn_now_playing_worker(station, now_playing_tx, Arc::clone(&stop_flag));
 
         self.current_station = Some(station);
+        self.last_station_key = Some(station.key.to_string());
+        self.now_playing_confirmed = false;
         self.now_playing.clear();
         self.spectrum.fill(0);
         self.current_bitrate = None;
@@ -253,6 +277,9 @@ impl App {
         self.now_playing_rx = Some(now_playing_rx);
         self.bitrate_rx = Some(bitrate_rx);
         self.sync_shared_state();
+        // Paused = session start signal on macOS (equiv. to AVAudioSession.setActive on iOS).
+        // Transitions to .playing in update_now_playing_metadata once audio flows.
+        begin_now_playing_session(station.label);
     }
 
     fn process_updates(&mut self) {
@@ -272,6 +299,7 @@ impl App {
                 }
                 self.dirty = true;
                 self.sync_shared_state();
+                self.update_now_playing_metadata();
             }
         }
 
@@ -298,6 +326,14 @@ impl App {
                     if let Some(station) = self.current_station {
                         self.set_playing_status(station);
                     }
+                    // Re-push Now Playing state once audio is confirmed flowing.
+                    // macOS only recognises a process as a media app after CoreAudio
+                    // output has started, so the first push (in start_playback) may
+                    // be ignored. Sending it again here ensures it lands.
+                    if !self.now_playing_confirmed {
+                        self.now_playing_confirmed = true;
+                        self.update_now_playing_metadata();
+                    }
                     self.dirty = true;
                 }
             }
@@ -312,8 +348,23 @@ impl App {
                 }
             }
             ControlCommand::Stop => self.stop_playback(),
+            ControlCommand::Toggle => {
+                if self.current_station.is_some() {
+                    self.stop_playback();
+                } else {
+                    let station = self.last_station_key.clone()
+                        .as_deref()
+                        .and_then(match_station)
+                        .unwrap_or(STATIONS[0]);
+                    self.start_playback(station);
+                }
+            }
             ControlCommand::Next => {
                 let station = next_station(self.current_station);
+                self.start_playback(station);
+            }
+            ControlCommand::Prev => {
+                let station = prev_station(self.current_station);
                 self.start_playback(station);
             }
             ControlCommand::Color(query) => {
@@ -347,6 +398,17 @@ impl App {
         self.sync_shared_state();
     }
 
+    fn update_now_playing_metadata(&mut self) {
+        if let Some(station) = self.current_station {
+            let (title, artist) = split_now_playing(&self.now_playing, station.label);
+            push_now_playing(
+                &title,
+                if artist.is_empty() { None } else { Some(artist.as_str()) },
+                Some(station.label),
+            );
+        }
+    }
+
     fn sync_shared_state(&self) {
         if let Ok(mut state) = self.shared_state.lock() {
             state.running = self.current_station.is_some();
@@ -356,6 +418,19 @@ impl App {
             state.volume = self.volume_step;
             state.pid = std::process::id();
             let _ = write_widget_state(&state);
+        }
+    }
+}
+
+impl Theme {
+    fn is_animated(self) -> bool {
+        matches!(self.palette, ThemePalette::AnimatedRainbow)
+    }
+
+    fn accent_color(self, elapsed: Duration, offset: f32) -> Color {
+        match self.palette {
+            ThemePalette::Solid(color) => color,
+            ThemePalette::AnimatedRainbow => rainbow_color(elapsed, offset),
         }
     }
 }
@@ -373,8 +448,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         pid: std::process::id(),
     }));
     let control_server_stop = Arc::new(AtomicBool::new(false));
-    let control_server = spawn_control_server(control_tx, Arc::clone(&shared_state), Arc::clone(&control_server_stop));
-    let mut app = App::new(control_rx, Arc::clone(&shared_state));
+    let control_server = spawn_control_server(control_tx.clone(), Arc::clone(&shared_state), Arc::clone(&control_server_stop));
+
+    let run_loop_stop = Arc::new(AtomicBool::new(false));
+    let run_loop_thread = spawn_ns_run_loop(Arc::clone(&run_loop_stop));
+
+    let media_controls = init_media_controls(control_tx);
+
+    let mut app = App::new(control_rx, Arc::clone(&shared_state), media_controls);
     app.sync_shared_state();
     let mut terminal = init_terminal()?;
 
@@ -384,9 +465,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     app.stop_playback();
     App::set_tab_title("");
     control_server_stop.store(true, Ordering::SeqCst);
+    run_loop_stop.store(true, Ordering::SeqCst);
     let _ = UnixStream::connect(CONTROL_SOCKET_PATH);
     let _ = fs::remove_file(CONTROL_SOCKET_PATH);
     let _ = control_server.join();
+    let _ = run_loop_thread.join();
     result
 }
 
@@ -434,7 +517,8 @@ fn run_app(
     loop {
         app.process_updates();
 
-        if app.dirty && app.last_spectrum_draw.elapsed() >= Duration::from_millis(1000 / SPECTRUM_FPS) {
+        let frame_due = app.last_spectrum_draw.elapsed() >= Duration::from_millis(1000 / SPECTRUM_FPS);
+        if frame_due && (app.dirty || app.theme.is_animated()) {
             terminal.draw(|frame| draw_ui(frame, app))?;
             if let Some(station) = app.current_station {
                 let anim = spectrum_tab_animation(&app.spectrum);
@@ -503,6 +587,7 @@ fn run_app(
 }
 
 fn draw_ui(frame: &mut ratatui::Frame<'_>, app: &App) {
+    let elapsed = app.started_at.elapsed();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -517,18 +602,23 @@ fn draw_ui(frame: &mut ratatui::Frame<'_>, app: &App) {
             Block::default()
                 .title("Status")
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(app.theme.color)),
+                .border_style(Style::default().fg(app.theme.accent_color(elapsed, 0.0))),
         );
     frame.render_widget(status, chunks[0]);
 
-    let spectrum_text = render_spectrum_text(&app.spectrum, chunks[1].width.saturating_sub(2), chunks[1].height.saturating_sub(2));
+    let spectrum_text = render_spectrum_text(
+        &app.spectrum,
+        chunks[1].width.saturating_sub(2),
+        chunks[1].height.saturating_sub(2),
+        app.theme,
+        elapsed,
+    );
     let spectrum = Paragraph::new(spectrum_text)
-        .style(Style::default().fg(app.theme.color))
         .block(
             Block::default()
                 .title("Spectrum")
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(app.theme.color)),
+                .border_style(Style::default().fg(app.theme.accent_color(elapsed, 0.18))),
         );
     frame.render_widget(spectrum, chunks[1]);
 
@@ -537,7 +627,7 @@ fn draw_ui(frame: &mut ratatui::Frame<'_>, app: &App) {
             Block::default()
                 .title("Command")
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(app.theme.color)),
+                .border_style(Style::default().fg(app.theme.accent_color(elapsed, 0.36))),
         );
     frame.render_widget(input, chunks[2]);
 
@@ -562,7 +652,13 @@ fn spectrum_tab_animation(spectrum: &[u16]) -> String {
         .collect()
 }
 
-fn render_spectrum_text(bins: &[u16], width: u16, height: u16) -> Vec<Line<'static>> {
+fn render_spectrum_text(
+    bins: &[u16],
+    width: u16,
+    height: u16,
+    theme: Theme,
+    elapsed: Duration,
+) -> Vec<Line<'static>> {
     let width = width as usize;
     let height = height as usize;
 
@@ -582,7 +678,22 @@ fn render_spectrum_text(bins: &[u16], width: u16, height: u16) -> Vec<Line<'stat
     }
 
     rows.into_iter()
-        .map(|row| Line::from(row.into_iter().collect::<String>()))
+        .map(|row| {
+            let spans = row
+                .into_iter()
+                .enumerate()
+                .map(|(col, ch)| {
+                    let offset = if width <= 1 {
+                        0.0
+                    } else {
+                        col as f32 / (width - 1) as f32
+                    };
+                    let color = theme.accent_color(elapsed, offset);
+                    ratatui::text::Span::styled(ch.to_string(), Style::default().fg(color))
+                })
+                .collect::<Vec<_>>();
+            Line::from(spans)
+        })
         .collect()
 }
 
@@ -661,6 +772,30 @@ fn vertical_block(units: isize) -> char {
         7 => '▇',
         _ => '█',
     }
+}
+
+fn rainbow_color(elapsed: Duration, offset: f32) -> Color {
+    let cycle = (elapsed.as_secs_f32() * 0.35 + offset).fract();
+    let hue = cycle * 360.0;
+    let (r, g, b) = hsv_to_rgb(hue, 1.0, 1.0);
+    Color::Rgb(r, g, b)
+}
+
+fn hsv_to_rgb(hue: f32, saturation: f32, value: f32) -> (u8, u8, u8) {
+    let chroma = value * saturation;
+    let segment = (hue / 60.0) % 6.0;
+    let x = chroma * (1.0 - ((segment % 2.0) - 1.0).abs());
+    let (r1, g1, b1) = match segment {
+        s if (0.0..1.0).contains(&s) => (chroma, x, 0.0),
+        s if (1.0..2.0).contains(&s) => (x, chroma, 0.0),
+        s if (2.0..3.0).contains(&s) => (0.0, chroma, x),
+        s if (3.0..4.0).contains(&s) => (0.0, x, chroma),
+        s if (4.0..5.0).contains(&s) => (x, 0.0, chroma),
+        _ => (chroma, 0.0, x),
+    };
+    let m = value - chroma;
+    let to_u8 = |channel: f32| ((channel + m) * 255.0).round().clamp(0.0, 255.0) as u8;
+    (to_u8(r1), to_u8(g1), to_u8(b1))
 }
 
 fn execute_command(app: &mut App) {
@@ -806,6 +941,154 @@ fn next_station(current: Option<Station>) -> Station {
     } else {
         STATIONS[0]
     }
+}
+
+fn prev_station(current: Option<Station>) -> Station {
+    if let Some(current) = current {
+        let index = STATIONS
+            .iter()
+            .position(|station| station.key == current.key)
+            .unwrap_or(0);
+        STATIONS[(index + STATIONS.len() - 1) % STATIONS.len()]
+    } else {
+        STATIONS[STATIONS.len() - 1]
+    }
+}
+
+fn split_now_playing(now_playing: &str, station_label: &str) -> (String, String) {
+    if now_playing.is_empty() || now_playing == "Unknown" {
+        return (station_label.to_string(), String::new());
+    }
+    if let Some((title, artist)) = now_playing.split_once(" \u{2014} ") {
+        (title.to_string(), artist.to_string())
+    } else {
+        (now_playing.to_string(), String::new())
+    }
+}
+
+// MediaPlayer framework constants (linked via souvlaki's build.rs)
+unsafe extern "C" {
+    static MPMediaItemPropertyTitle: id;
+    static MPMediaItemPropertyArtist: id;
+    static MPMediaItemPropertyAlbumTitle: id;
+    static MPNowPlayingInfoPropertyPlaybackRate: id;
+    static MPNowPlayingInfoPropertyIsLiveStream: id;
+}
+
+/// Step 1 of the Apple-documented macOS Now Playing session lifecycle:
+/// set playbackState = .paused with initial metadata. This is the macOS
+/// equivalent of AVAudioSession.setActive(true) on iOS — it signals to
+/// mediaremoted that this process is about to become a media player and
+/// causes it to appear in Control Center. Must be called before .playing.
+///
+/// Reference: MPNowPlayableBehavior.handleNowPlayableSessionStart()
+fn begin_now_playing_session(station_label: &str) {
+    use cocoa::foundation::NSString;
+    use cocoa::base::{nil, YES};
+    unsafe {
+        let center: id = msg_send![class!(MPNowPlayingInfoCenter), defaultCenter];
+        let dict: id = msg_send![class!(NSMutableDictionary), dictionary];
+
+        let title_ns = NSString::alloc(nil).init_str(station_label);
+        let _: () = msg_send![dict, setObject: title_ns forKey: MPMediaItemPropertyTitle];
+
+        // rate 0.0 = not yet playing (will be updated to 1.0 once audio flows)
+        let rate: id = msg_send![class!(NSNumber), numberWithDouble: 0.0_f64];
+        let _: () = msg_send![dict, setObject: rate forKey: MPNowPlayingInfoPropertyPlaybackRate];
+
+        let live: id = msg_send![class!(NSNumber), numberWithBool: YES];
+        let _: () = msg_send![dict, setObject: live forKey: MPNowPlayingInfoPropertyIsLiveStream];
+
+        let _: () = msg_send![center, setNowPlayingInfo: dict];
+        // MPNowPlayingPlaybackStatePaused = 2
+        let _: () = msg_send![center, setPlaybackState: 2_usize];
+    }
+}
+
+/// Step 2: called once audio is confirmed playing and whenever metadata
+/// updates. Sets rate = 1.0 and playbackState = .playing.
+fn push_now_playing(title: &str, artist: Option<&str>, album: Option<&str>) {
+    use cocoa::foundation::NSString;
+    use cocoa::base::{nil, YES};
+    unsafe {
+        let center: id = msg_send![class!(MPNowPlayingInfoCenter), defaultCenter];
+        let dict: id = msg_send![class!(NSMutableDictionary), dictionary];
+
+        let title_ns = NSString::alloc(nil).init_str(title);
+        let _: () = msg_send![dict, setObject: title_ns forKey: MPMediaItemPropertyTitle];
+
+        if let Some(a) = artist {
+            let a_ns = NSString::alloc(nil).init_str(a);
+            let _: () = msg_send![dict, setObject: a_ns forKey: MPMediaItemPropertyArtist];
+        }
+        if let Some(al) = album {
+            let al_ns = NSString::alloc(nil).init_str(al);
+            let _: () = msg_send![dict, setObject: al_ns forKey: MPMediaItemPropertyAlbumTitle];
+        }
+
+        let rate: id = msg_send![class!(NSNumber), numberWithDouble: 1.0_f64];
+        let _: () = msg_send![dict, setObject: rate forKey: MPNowPlayingInfoPropertyPlaybackRate];
+
+        let live: id = msg_send![class!(NSNumber), numberWithBool: YES];
+        let _: () = msg_send![dict, setObject: live forKey: MPNowPlayingInfoPropertyIsLiveStream];
+
+        let _: () = msg_send![center, setNowPlayingInfo: dict];
+        // MPNowPlayingPlaybackStatePlaying = 1
+        let _: () = msg_send![center, setPlaybackState: 1_usize];
+    }
+}
+
+/// Step 3: session end — yield Now Playing to another app.
+fn clear_now_playing() {
+    unsafe {
+        let center: id = msg_send![class!(MPNowPlayingInfoCenter), defaultCenter];
+        let _: () = msg_send![center, setNowPlayingInfo: cocoa::base::nil];
+        // MPNowPlayingPlaybackStateStopped = 3
+        let _: () = msg_send![center, setPlaybackState: 3_usize];
+    }
+}
+
+/// Spin up a background thread whose sole job is to keep an NSRunLoop alive.
+/// Without this, the XPC handshake between MPNowPlayingInfoCenter and the
+/// system `mediaremoted` daemon is never completed, so the app never appears
+/// in Control Center / Now Playing.
+fn spawn_ns_run_loop(stop_flag: Arc<AtomicBool>) -> JoinHandle<()> {
+    thread::spawn(move || {
+        unsafe {
+            while !stop_flag.load(Ordering::SeqCst) {
+                let pool: id = msg_send![class!(NSAutoreleasePool), new];
+                let rl: id = msg_send![class!(NSRunLoop), currentRunLoop];
+                // Run for 100 ms, then check the stop flag.
+                let date: id = msg_send![class!(NSDate), dateWithTimeIntervalSinceNow: 0.1_f64];
+                let _: () = msg_send![rl, runUntilDate: date];
+                let _: () = msg_send![pool, drain];
+            }
+        }
+    })
+}
+
+fn init_media_controls(control_tx: std::sync::mpsc::Sender<ControlCommand>) -> Option<MediaControls> {
+    let config = PlatformConfig {
+        dbus_name: "iterm-player",
+        display_name: "iterm-player",
+        hwnd: None,
+    };
+    let mut controls = MediaControls::new(config).ok()?;
+    controls.attach(move |event: MediaControlEvent| {
+        let cmd = match event {
+            MediaControlEvent::Play => Some(ControlCommand::Toggle),
+            MediaControlEvent::Pause => Some(ControlCommand::Stop),
+            MediaControlEvent::Toggle => Some(ControlCommand::Toggle),
+            MediaControlEvent::Stop => Some(ControlCommand::Stop),
+            MediaControlEvent::Next => Some(ControlCommand::Next),
+            MediaControlEvent::Previous => Some(ControlCommand::Prev),
+            _ => None,
+        };
+        if let Some(cmd) = cmd {
+            let _ = control_tx.send(cmd);
+        }
+    }).ok()?;
+    Some(controls)
 }
 
 fn spawn_control_server(
