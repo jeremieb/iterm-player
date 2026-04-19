@@ -30,6 +30,7 @@ use ratatui::{
 use rustfft::{FftPlanner, num_complex::Complex32};
 use serde_json::{Value, json};
 use souvlaki::{MediaControlEvent, MediaControls, PlatformConfig};
+#[allow(deprecated)]
 use cocoa::base::id;
 use objc::{class, msg_send, sel, sel_impl};
 
@@ -132,7 +133,7 @@ struct App {
     fps_frame_count: u32,
     fps_window_start: Instant,
     current_fps: u32,
-    media_controls: Option<MediaControls>,
+    _media_controls: Option<MediaControls>,
     last_station_key: Option<String>,
     now_playing_confirmed: bool,
 }
@@ -184,7 +185,7 @@ impl App {
             fps_frame_count: 0,
             fps_window_start: Instant::now(),
             current_fps: 0,
-            media_controls,
+            _media_controls: media_controls,
             last_station_key: None,
             now_playing_confirmed: false,
         }
@@ -967,6 +968,7 @@ fn split_now_playing(now_playing: &str, station_label: &str) -> (String, String)
 }
 
 // MediaPlayer framework constants (linked via souvlaki's build.rs)
+#[allow(deprecated)]
 unsafe extern "C" {
     static MPMediaItemPropertyTitle: id;
     static MPMediaItemPropertyArtist: id;
@@ -982,6 +984,7 @@ unsafe extern "C" {
 /// causes it to appear in Control Center. Must be called before .playing.
 ///
 /// Reference: MPNowPlayableBehavior.handleNowPlayableSessionStart()
+#[allow(deprecated)]
 fn begin_now_playing_session(station_label: &str) {
     use cocoa::foundation::NSString;
     use cocoa::base::{nil, YES};
@@ -1007,6 +1010,7 @@ fn begin_now_playing_session(station_label: &str) {
 
 /// Step 2: called once audio is confirmed playing and whenever metadata
 /// updates. Sets rate = 1.0 and playbackState = .playing.
+#[allow(deprecated)]
 fn push_now_playing(title: &str, artist: Option<&str>, album: Option<&str>) {
     use cocoa::foundation::NSString;
     use cocoa::base::{nil, YES};
@@ -1039,6 +1043,7 @@ fn push_now_playing(title: &str, artist: Option<&str>, album: Option<&str>) {
 }
 
 /// Step 3: session end — yield Now Playing to another app.
+#[allow(deprecated)]
 fn clear_now_playing() {
     unsafe {
         let center: id = msg_send![class!(MPNowPlayingInfoCenter), defaultCenter];
@@ -1052,6 +1057,7 @@ fn clear_now_playing() {
 /// Without this, the XPC handshake between MPNowPlayingInfoCenter and the
 /// system `mediaremoted` daemon is never completed, so the app never appears
 /// in Control Center / Now Playing.
+#[allow(deprecated)]
 fn spawn_ns_run_loop(stop_flag: Arc<AtomicBool>) -> JoinHandle<()> {
     thread::spawn(move || {
         unsafe {
