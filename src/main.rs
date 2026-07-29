@@ -479,7 +479,6 @@ fn configure_gstreamer_env() {
     let lib_dir = format!("{HOMEBREW_PREFIX}/lib");
     let typelib_dir = format!("{lib_dir}/girepository-1.0");
     let plugin_dir = format!("{lib_dir}/gstreamer-1.0");
-    let scanner = format!("{HOMEBREW_PREFIX}/Cellar/gstreamer/1.28.1/libexec/gstreamer-1.0/gst-plugin-scanner");
     let gio_modules = format!("{lib_dir}/gio/modules");
 
     prepend_env_path("DYLD_FALLBACK_LIBRARY_PATH", &lib_dir);
@@ -487,11 +486,69 @@ fn configure_gstreamer_env() {
     prepend_env_path("GST_PLUGIN_SYSTEM_PATH_1_0", &plugin_dir);
     prepend_env_path("GIO_EXTRA_MODULES", &gio_modules);
 
-    if std::path::Path::new(&scanner).exists() {
+    // GStreamer only forks the gst-plugin-scanner helper when GST_PLUGIN_SCANNER
+    // points at it; otherwise the registry is built in-process, which is slow
+    // and, after a Homebrew gstreamer upgrade, happens on every launch because
+    // the cached registry is invalidated against the newer plugin mtimes.
+    // Resolve the scanner that matches the currently linked libgstreamer so a
+    // Homebrew version bump can't silently break this path.
+    if let Some(scanner) = resolve_gst_plugin_scanner() {
         unsafe {
             std::env::set_var("GST_PLUGIN_SCANNER", scanner);
         }
     }
+}
+
+fn resolve_gst_plugin_scanner() -> Option<String> {
+    // Prefer the scanner next to whichever libgstreamer the binary actually
+    // resolved to. Homebrew keeps the keg version in the dylib install name.
+    let libgstreamer = std::env::current_exe().ok().and_then(|exe| {
+        let output = std::process::Command::new("otool")
+            .arg("-L")
+            .arg(&exe)
+            .output()
+            .ok()?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        stdout.lines().find_map(|line| {
+            let path = line.trim().split_whitespace().next()?;
+            (path.contains("libgstreamer-1.0")).then(|| path.to_string())
+        })
+    });
+
+    if let Some(lib_path) = libgstreamer {
+        // lib_path looks like /opt/homebrew/opt/gstreamer/lib/libgstreamer-1.0.0.dylib
+        // or /opt/homebrew/Cellar/gstreamer/1.28.5/lib/libgstreamer-1.0.0.dylib.
+        if let Some(idx) = lib_path.rfind("/lib/") {
+            let prefix = &lib_path[..idx];
+            let candidate = format!("{prefix}/libexec/gstreamer-1.0/gst-plugin-scanner");
+            if std::path::Path::new(&candidate).exists() {
+                return Some(candidate);
+            }
+        }
+    }
+
+    // Last resort: glob the Cellar for the highest installed gstreamer version.
+    glob_latest_gst_scanner()
+}
+
+fn glob_latest_gst_scanner() -> Option<String> {
+    let cellar = std::path::Path::new("/opt/homebrew/Cellar/gstreamer");
+    let entries = std::fs::read_dir(cellar).ok()?;
+    let mut versions: Vec<String> = entries
+        .filter_map(|e| e.ok())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .collect();
+    versions.sort();
+    versions.reverse();
+    for v in versions {
+        let candidate = format!(
+            "/opt/homebrew/Cellar/gstreamer/{v}/libexec/gstreamer-1.0/gst-plugin-scanner"
+        );
+        if std::path::Path::new(&candidate).exists() {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 fn prepend_env_path(key: &str, value: &str) {
