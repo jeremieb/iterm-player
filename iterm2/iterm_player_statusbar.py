@@ -240,15 +240,19 @@ async def handle_http(reader, writer, connection):
         if method == "OPTIONS":
             writer.write(http_response("204 No Content", ""))
         elif method == "POST" and path == "/toggle":
-            await toggle_playback(connection)
-            writer.write(http_response("200 OK", '{"ok":true}'))
+            ok = await toggle_playback(connection)
+            status = "200 OK" if ok else "502 Bad Gateway"
+            writer.write(http_response(status, json.dumps({"ok": ok})))
         elif method == "POST" and path == "/next":
-            await next_station(connection)
-            writer.write(http_response("200 OK", '{"ok":true}'))
+            ok = await next_station(connection)
+            status = "200 OK" if ok else "502 Bad Gateway"
+            writer.write(http_response(status, json.dumps({"ok": ok})))
         else:
             writer.write(http_response("404 Not Found", '{"ok":false}'))
 
         await writer.drain()
+    except Exception:
+        pass
     finally:
         writer.close()
         await writer.wait_closed()
@@ -262,12 +266,6 @@ async def main(connection):
         exemplar="▶ | ▶▶ | Worldwide FM",
         update_cadence=0.5,
         identifier="com.jeremieberduck.iterm-player.controls",
-    )
-
-    server = await asyncio.start_server(
-        lambda reader, writer: handle_http(reader, writer, connection),
-        HTTP_HOST,
-        HTTP_PORT,
     )
 
     @iterm2.StatusBarRPC
@@ -286,8 +284,20 @@ async def main(connection):
 
     await component.async_register(connection, player_coro, onclick=player_click)
 
-    async with server:
-        await server.serve_forever()
+    server = await asyncio.start_server(
+        lambda reader, writer: handle_http(reader, writer, connection),
+        HTTP_HOST,
+        HTTP_PORT,
+    )
+
+    try:
+        async with server:
+            await server.serve_forever()
+    except asyncio.CancelledError:
+        raise
+    finally:
+        server.close()
+        await server.wait_closed()
 
 
-iterm2.run_forever(main)
+iterm2.run_forever(main, retry=True)
